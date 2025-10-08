@@ -1,0 +1,26 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migration-job-db1
+  namespace: db-migration
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: db-migration
+        database: db1
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: migration
+        image: azuredb-migration:v1
+        imagePullPolicy: Never
+        envFrom:
+        - configMapRef:
+            name: migration-common-config
+        - configMapRef:
+            name: migration-db1-config
+        - secretRef:
+            name: migration-secrets
+
