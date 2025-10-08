@@ -30,6 +30,7 @@ class Config:
     AZURE_DB = os.getenv('AZURE_DATABASE', 'migration_demo')
     AZURE_USER = os.getenv('AZURE_USER', 'azureadmin')
     AZURE_PASS = os.getenv('AZURE_PASSWORD')
+    AZURE_SCHEMA = os.getenv('AZURE_SCHEMA', 'public')
     AZURE_RG = os.getenv('RESOURCE_GROUP_DB')
     AZURE_REGION = os.getenv('AZURE_REGION', 'centralus')
     AZURE_SKU = os.getenv('AZURE_SKU', 'Standard_B1ms')
@@ -39,7 +40,7 @@ class Config:
     
     # Local PostgreSQL
     LOCAL_HOST = os.getenv('LOCAL_HOST', 'localhost')
-    LOCAL_DB = os.getenv('LOCAL_DATABASE', 'migration_demo')
+    LOCAL_DB = os.getenv('LOCAL_DATABASE', 'migration_demo1')
     LOCAL_USER = os.getenv('LOCAL_USER', 'postgres')
     LOCAL_PASS = os.getenv('LOCAL_PASSWORD')
     
@@ -86,21 +87,67 @@ def execute_shell_command(command:str) -> str:
         })
         print(f"Tool Error: {error_output}")
         return error_output
+    
+
+def clean_sql_file(input_file: str, output_file: str, target_schema: str) -> str:
+    """Clean SQL file to make it schema-agnostic"""
+    try:
+        with open(input_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Remove public. prefixes
+        content = content.replace('public.', '')
+        
+        # Fix search_path
+        content = content.replace(
+            "SELECT pg_catalog.set_config('search_path', '', false);",
+            f"SET search_path TO {target_schema};"
+        )
+        content = content.replace(
+            'SET search_path = public;',
+            f'SET search_path = {target_schema};'
+        )
+        
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(content)
+        
+        return json.dumps({
+            "status": "SUCCESS",
+            "message": f"SQL file cleaned for schema {target_schema}",
+            "output_file": output_file
+        })
+    except Exception as e:
+        return json.dumps({
+            "status": "FAILED",
+            "error": str(e)
+        })
+
 
 # AGENT INSTRUCTIONS
 
 export_agent_instructions = f"""
-Export local database to SQL file.
+Export Agent: Export data from local PostGreSQL.
 
-Database: {Config.LOCAL_DB}
+Local Database: {Config.LOCAL_HOST}/{Config.LOCAL_DB}
 User: {Config.LOCAL_USER}
-Host: {Config.LOCAL_HOST}
 Output file: migration_backup.sql
 
-Execute these commands in order:
-1. psql -h localhost -U postgres -d migration_demo -t -c "SELECT COUNT(*) FROM customers;"
-2. psql -h localhost -U postgres -d migration_demo -t -c "SELECT COUNT(*) FROM orders;"
-3. pg_dump -U postgres -h localhost -d migration_demo -f migration_backup.sql
+Tasks:
+1. Count customers in LOCAL database
+2. Count orders in LOCAL database  
+3. Export WITHOUT schema qualification
+4. Clean SQL file to remove schema references:
+   Use clean_sql_file tool with these parameters:
+   - input_file: migration_backup.sql
+   - output_file: migration_backup.sql  
+   - target_schema: {Config.AZURE_SCHEMA}
+
+Commands:
+psql -h localhost -U {Config.LOCAL_USER} -d {Config.LOCAL_DB} -t -c "SELECT COUNT(*) FROM customers;"
+psql -h localhost -U {Config.LOCAL_USER} -d {Config.LOCAL_DB} -t -c "SELECT COUNT(*) FROM orders;"
+pg_dump -h localhost -U {Config.LOCAL_USER} -d {Config.LOCAL_DB} -t customers -t orders --no-owner --no-acl -f migration_backup.sql
+
+IMPORTANT: The pg_dump must use --no-owner --no-acl flags to avoid schema conflicts.
 
 Use execute_shell_command tool. Parse JSON "stdout" field.
 
@@ -109,7 +156,7 @@ COMMAND: [exact command]
 OUTPUT: [stdout]
 STATUS: SUCCESS/FAILED
 
-Say "EXPORT COMPLETE" after all 3 commands. STOP.
+Say "EXPORT COMPLETE" after all 4 commands. STOP.
 """
 
 azure_setup_agent_instructions = f"""
@@ -132,51 +179,72 @@ Say "SETUP COMPLETE" after command. STOP.
 """
 
 import_agent_instructions = f"""
-Import SQL file to Azure PostgreSQL.
+ImportAgent: Import data to Azure PostgreSQL schema.
 
-Server: {Config.AZURE_SERVER_FULL}
-Database: {Config.AZURE_DB}
-User: {Config.AZURE_USER}
-File: migration_backup.sql
+Azure Server: {Config.AZURE_SERVER_FULL}
+Azure Database: {Config.AZURE_DB}
+Azure Schema: {Config.AZURE_SCHEMA}
+Azure User: {Config.AZURE_USER}
+Backup File: migration_backup.sql
+
+IMPORTANT: All operations must use "SET search_path TO {Config.AZURE_SCHEMA};" to target the correct schema.
 
 Execute these commands in order:
-1. psql -h {Config.AZURE_SERVER_FULL} -U {Config.AZURE_USER} -d {Config.AZURE_DB} -c "DROP TABLE IF EXISTS customers CASCADE;"
-2. psql -h {Config.AZURE_SERVER_FULL} -U {Config.AZURE_USER} -d {Config.AZURE_DB} -c "DROP TABLE IF EXISTS orders CASCADE;"
-3. psql -h {Config.AZURE_SERVER_FULL} -U {Config.AZURE_USER} -d {Config.AZURE_DB} -f migration_backup.sql
-4. psql -h {Config.AZURE_SERVER_FULL} -U {Config.AZURE_USER} -d {Config.AZURE_DB} -t -c "SELECT COUNT(*) FROM customers;"
-5. psql -h {Config.AZURE_SERVER_FULL} -U {Config.AZURE_USER} -d {Config.AZURE_DB} -t -c "SELECT COUNT(*) FROM orders;"
+1. Drop orders table in schema:
+   psql -h {Config.AZURE_SERVER_FULL} -U {Config.AZURE_USER} -d {Config.AZURE_DB} -c "SET search_path TO {Config.AZURE_SCHEMA}; DROP TABLE IF EXISTS orders CASCADE;"
+   
+2. Drop customers table in schema:
+   psql -h {Config.AZURE_SERVER_FULL} -U {Config.AZURE_USER} -d {Config.AZURE_DB} -c "SET search_path TO {Config.AZURE_SCHEMA}; DROP TABLE IF EXISTS customers CASCADE;"
+   
+3. Import backup file to schema:
+   psql -h {Config.AZURE_SERVER_FULL} -U {Config.AZURE_USER} -d {Config.AZURE_DB} -v ON_ERROR_STOP=1 -c "SET search_path TO {Config.AZURE_SCHEMA};" -f migration_backup.sql
+
+4. Verify import in schema:
+   psql -h {Config.AZURE_SERVER_FULL} -U {Config.AZURE_USER} -d {Config.AZURE_DB} -t -c "SET search_path TO {Config.AZURE_SCHEMA}; SELECT COUNT(*) FROM customers;"
+   psql -h {Config.AZURE_SERVER_FULL} -U {Config.AZURE_USER} -d {Config.AZURE_DB} -t -c "SET search_path TO {Config.AZURE_SCHEMA}; SELECT COUNT(*) FROM orders;"
 
 Use execute_shell_command tool. Parse JSON "stdout" field.
 
-Output format:
-COMMAND: [exact command]
-OUTPUT: [stdout]
-STATUS: SUCCESS/FAILED
+Output summary:
+Imported customers: X
+Imported orders: Y
+Target Schema: {Config.AZURE_SCHEMA}
 
-Say "IMPORT COMPLETE" after all 5 commands. STOP.
+Say "IMPORT COMPLETE" and STOP.
 """
 
 verify_agent_instructions = f"""
-Verify migration by comparing local vs Azure row counts.
+VerificationAgent: Verify migration to Azure schema and local db.
 
 Local: localhost/{Config.LOCAL_DB} (user: {Config.LOCAL_USER})
 Azure: {Config.AZURE_SERVER_FULL}/{Config.AZURE_DB} (user: {Config.AZURE_USER})
+Azure Schema: {Config.AZURE_SCHEMA}
 
-Execute these commands in order:
-1. psql -h localhost -U {Config.LOCAL_USER} -d {Config.LOCAL_DB} -t -c "SELECT COUNT(*) FROM customers;"
-2. psql -h localhost -U {Config.LOCAL_USER} -d {Config.LOCAL_DB} -t -c "SELECT COUNT(*) FROM orders;"
-3. psql -h {Config.AZURE_SERVER_FULL} -U {Config.AZURE_USER} -d {Config.AZURE_DB} -t -c "SELECT COUNT(*) FROM customers;"
-4. psql -h {Config.AZURE_SERVER_FULL} -U {Config.AZURE_USER} -d {Config.AZURE_DB} -t -c "SELECT COUNT(*) FROM orders;"
+Tasks:
+1. Count customers in LOCAL
+2. Count customers in Azure schema {Config.AZURE_SCHEMA}
+3. Count orders in LOCAL
+4. Count orders in Azure schema {Config.AZURE_SCHEMA}
+5. Compare counts
+
+Commands:
+psql -h localhost -U {Config.LOCAL_USER} -d {Config.LOCAL_DB} -t -c "SELECT COUNT(*) FROM customers;"
+psql -h {Config.AZURE_SERVER_FULL} -U {Config.AZURE_USER} -d {Config.AZURE_DB} -t -c "SET search_path TO {Config.AZURE_SCHEMA}; SELECT COUNT(*) FROM customers;"
+psql -h localhost -U {Config.LOCAL_USER} -d {Config.LOCAL_DB} -t -c "SELECT COUNT(*) FROM orders;"
+psql -h {Config.AZURE_SERVER_FULL} -U {Config.AZURE_USER} -d {Config.AZURE_DB} -t -c "SET search_path TO {Config.AZURE_SCHEMA}; SELECT COUNT(*) FROM orders;"
 
 Compare counts and report MATCH or MISMATCH.
 
 Use execute_shell_command tool. Parse JSON "stdout" field.
 
 Final summary:
-Local customers: X | Azure customers: Y | MATCH: YES/NO
-Local orders: X | Azure orders: Y | MATCH: YES/NO
+Local customers: X | Azure ({Config.AZURE_SCHEMA}) customers: Y | MATCH: YES/NO
+Local orders: X | Azure ({Config.AZURE_SCHEMA}) orders: Y | MATCH: YES/NO
 
-Say "VERIFICATION COMPLETE" after summary. STOP.
+If counts match: Say "VERIFICATION COMPLETE - ALL COUNTS MATCH"
+If counts mismatch: Say "VERIFICATION FAILED - COUNTS DO NOT MATCH"
+
+STOP after verification.
 """
 
 
@@ -193,6 +261,11 @@ async def run_migration_workflow():
     print(f" Pattern: Sequential Orchestration")
     print(f" Framework: Microsoft Agent Framework")
     print("="*70)
+    print(f" MIGRATION MAPPING:")
+    print(f"   Local DB:  {Config.LOCAL_DB}")
+    print(f"        TO")
+    print(f"   Azure Schema: {Config.AZURE_SCHEMA}")
+    print("="*70 + "\n")
     
     # Validate configuration
     if not Config.AZURE_RG:
@@ -215,7 +288,7 @@ async def run_migration_workflow():
                 instructions=export_agent_instructions,
                 name="DatabaseExportAgent",
                 model="gpt-4o",
-                tools = [execute_shell_command]
+                tools = [execute_shell_command, clean_sql_file]
             )
             print("   Export Agent created")
             
@@ -264,16 +337,15 @@ async def run_migration_workflow():
             
             # Initial migration request
             migration_request = f"""
-            Migrate PostgreSQL database from local to Azure.
+            Migrate PostgreSQL database from local to Azure Schema.
             
             Source: {Config.LOCAL_HOST}/{Config.LOCAL_DB}
-            Target: Azure PostgreSQL ({Config.AZURE_REGION})
+            Target: {Config.AZURE_DB} (Schema: {Config.AZURE_SCHEMA})
             
             Execute the migration with VERIFICATION at each step:
             1. Export local database WITH row count verification
-            2. Setup Azure PostgreSQL
-            3. Import data WITH cleanup (DROP CASCADE)
-            4. Verify migration by COMPARING local vs Azure counts
+            2. Import to Azure schema {Config.AZURE_SCHEMA}
+            3. Verify counts match
 
             Fail immediately if any step encounters errors.
             """
@@ -311,39 +383,13 @@ async def run_migration_workflow():
             print("="*70)
             print(f" Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             print(f" Total Steps: {len(outputs)}")
-            print("="*70)
-            
-            # Save results
-            result_file = os.path.join(
-                Config.PROJECT_DIR,
-                f"migration_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-            )
-            
-            with open(result_file, 'w', encoding='utf-8') as f:
-                f.write("="*70 + "\n")
-                f.write("AZURE DATABASE MIGRATION RESULTS\n")
-                f.write("="*70 + "\n\n")
-                
-                for i, step_output in enumerate(outputs, start=1):
-                    f.write(f"\nSTEP {i}:\n")
-                    f.write("-"*70 + "\n")
-                    for msg in step_output:
-                        if msg.role == Role.ASSISTANT:
-                            f.write(f"\nAgent: {msg.author_name}\n")
-                            f.write(f"{msg.text}\n")
-                    f.write("\n")
-            
-            print(f"\n Results saved to: {result_file}")
+            print("="*70 + "\n")
             
     except Exception as e:
         print("\n" + "="*70)
         print(" MIGRATION FAILED")
         print("="*70)
         print(f"Error: {str(e)}")
-        print("\nTroubleshooting:")
-        print("1. Ensure you're logged in to Azure CLI: az login")
-        print("2. Check .env file has correct values")
-        print("3. Verify Azure subscription is active")
         print("="*70)
 
 
