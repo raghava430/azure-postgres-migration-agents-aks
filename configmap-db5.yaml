@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: migration-db5-config
+  namespace: db-migration
+data:
+  LOCAL_DATABASE: "source_db5"
+  AZURE_SCHEMA: "db5_schema"
