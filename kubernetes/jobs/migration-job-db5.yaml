@@ -1,0 +1,27 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migration-job-db5
+  namespace: db-migration
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: db-migration
+        database: db5
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: migration-sa
+      restartPolicy: Never
+      containers:
+      - name: migration
+        image: raghavamigrationacr.azurecr.io/azuredb-migration:v8
+        imagePullPolicy: IfNotPresent
+        envFrom:
+        - configMapRef:
+            name: migration-common-config
+        - configMapRef:
+            name: migration-db5-config
+        - secretRef:
+            name: migration-secrets
