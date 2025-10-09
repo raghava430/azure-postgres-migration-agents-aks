@@ -1,8 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: migration-db4-config
-  namespace: db-migration
-data:
-  LOCAL_DATABASE: "source_db4"
-  AZURE_SCHEMA: "db4_schema"
