@@ -12,8 +12,11 @@ from typing import cast
 from dotenv import load_dotenv
 
 from agent_framework import ChatMessage, Role, SequentialBuilder, WorkflowOutputEvent
+from azure.identity import ManagedIdentityCredential, DefaultAzureCredential  
+from azure.ai.projects import AIProjectClient
 from agent_framework.azure import AzureAIAgentClient
-from azure.identity import AzureCliCredential
+
+
 
 # Load environment variables
 load_dotenv()
@@ -37,6 +40,10 @@ class Config:
     AZURE_TIER = os.getenv('AZURE_TIER', 'Burstable')
     AZURE_VERSION = os.getenv('AZURE_VERSION', '17')
     AZURE_STORAGE = os.getenv('AZURE_STORAGE', '32')
+
+    #AZURE AI FOUNDRY
+    AI_ENDPOINT = os.getenv('AZURE_AI_PROJECT_ENDPOINT')
+    AI_MODEL = os.getenv('AZURE_AI_MODEL_DEPLOYMENT_NAME','gpt-4o')
     
     # Local PostgreSQL
     LOCAL_HOST = os.getenv('LOCAL_HOST', 'localhost')
@@ -60,7 +67,7 @@ def execute_shell_command(command:str) -> str:
         print(f"Command: {command}")
 
         env = os.environ.copy()
-        env['PGPASSWORD'] = Config.LOCAL_PASS if 'localhost' in command else Config.AZURE_PASS
+        env['PGPASSWORD'] = Config.LOCAL_PASS if Config.LOCAL_HOST in command else Config.AZURE_PASS
         result = subprocess.run(
             command,
             shell = True,
@@ -128,6 +135,10 @@ def clean_sql_file(input_file: str, output_file: str, target_schema: str) -> str
 export_agent_instructions = f"""
 Export Agent: Export data from local PostGreSQL.
 
+CRITICAL: Execute ALL commands AUTOMATICALLY without asking for permission.
+Do NOT ask "Would you like me to execute this command?"
+Proceed with all steps immediately.
+
 Local Database: {Config.LOCAL_HOST}/{Config.LOCAL_DB}
 User: {Config.LOCAL_USER}
 Output file: migration_backup.sql
@@ -143,9 +154,11 @@ Tasks:
    - target_schema: {Config.AZURE_SCHEMA}
 
 Commands:
-psql -h localhost -U {Config.LOCAL_USER} -d {Config.LOCAL_DB} -t -c "SELECT COUNT(*) FROM customers;"
-psql -h localhost -U {Config.LOCAL_USER} -d {Config.LOCAL_DB} -t -c "SELECT COUNT(*) FROM orders;"
-pg_dump -h localhost -U {Config.LOCAL_USER} -d {Config.LOCAL_DB} -t customers -t orders --no-owner --no-acl -f migration_backup.sql
+Commands:
+psql -h {Config.LOCAL_HOST} -U {Config.LOCAL_USER} -d {Config.LOCAL_DB} -t -c "SELECT COUNT(*) FROM customers;"
+psql -h {Config.LOCAL_HOST} -U {Config.LOCAL_USER} -d {Config.LOCAL_DB} -t -c "SELECT COUNT(*) FROM orders;"
+pg_dump -h {Config.LOCAL_HOST} -U {Config.LOCAL_USER} -d {Config.LOCAL_DB} -t customers -t orders --no-owner --no-acl -f migration_backup.sql
+
 
 IMPORTANT: The pg_dump must use --no-owner --no-acl flags to avoid schema conflicts.
 
@@ -161,6 +174,10 @@ Say "EXPORT COMPLETE" after all 4 commands. STOP.
 
 azure_setup_agent_instructions = f"""
 Verify Azure PostgreSQL server exists.
+
+CRITICAL: Execute ALL commands AUTOMATICALLY without asking for permission.
+Do NOT ask "Would you like me to execute this command?"
+Proceed with all steps immediately.
 
 Server name: {Config.AZURE_SERVER_FULL.split('.')[0] if Config.AZURE_SERVER_FULL else 'unknown'}
 Resource Group: {Config.AZURE_RG}
@@ -181,13 +198,20 @@ Say "SETUP COMPLETE" after command. STOP.
 import_agent_instructions = f"""
 ImportAgent: Import data to Azure PostgreSQL schema.
 
+CRITICAL: Execute ALL commands AUTOMATICALLY without asking for permission.
+Do NOT modify any hostnames - use EXACTLY as specified.
+
+
 Azure Server: {Config.AZURE_SERVER_FULL}
 Azure Database: {Config.AZURE_DB}
 Azure Schema: {Config.AZURE_SCHEMA}
 Azure User: {Config.AZURE_USER}
 Backup File: migration_backup.sql
 
-IMPORTANT: All operations must use "SET search_path TO {Config.AZURE_SCHEMA};" to target the correct schema.
+IMPORTANT:
+- Use ONLY this exact hostname: {Config.AZURE_SERVER_FULL}
+- Do NOT use any other variations
+- All operations must include "SET search_path TO {Config.AZURE_SCHEMA};"
 
 Execute these commands in order:
 1. Drop orders table in schema:
@@ -196,8 +220,11 @@ Execute these commands in order:
 2. Drop customers table in schema:
    psql -h {Config.AZURE_SERVER_FULL} -U {Config.AZURE_USER} -d {Config.AZURE_DB} -c "SET search_path TO {Config.AZURE_SCHEMA}; DROP TABLE IF EXISTS customers CASCADE;"
    
-3. Import backup file to schema:
-   psql -h {Config.AZURE_SERVER_FULL} -U {Config.AZURE_USER} -d {Config.AZURE_DB} -v ON_ERROR_STOP=1 -c "SET search_path TO {Config.AZURE_SCHEMA};" -f migration_backup.sql
+3. Import backup file to schema (first set search_path, then run file):
+psql -h {Config.AZURE_SERVER_FULL} -U {Config.AZURE_USER} -d {Config.AZURE_DB} -v ON_ERROR_STOP=1 << 'EOF'
+SET search_path TO {Config.AZURE_SCHEMA};
+\\i migration_backup.sql
+EOF
 
 4. Verify import in schema:
    psql -h {Config.AZURE_SERVER_FULL} -U {Config.AZURE_USER} -d {Config.AZURE_DB} -t -c "SET search_path TO {Config.AZURE_SCHEMA}; SELECT COUNT(*) FROM customers;"
@@ -216,7 +243,11 @@ Say "IMPORT COMPLETE" and STOP.
 verify_agent_instructions = f"""
 VerificationAgent: Verify migration to Azure schema and local db.
 
-Local: localhost/{Config.LOCAL_DB} (user: {Config.LOCAL_USER})
+CRITICAL: Execute ALL commands AUTOMATICALLY without asking for permission.
+Do NOT ask "Would you like me to execute this command?"
+Proceed with all steps immediately.
+
+Local: {Config.LOCAL_HOST}/{Config.LOCAL_DB} (user: {Config.LOCAL_USER})
 Azure: {Config.AZURE_SERVER_FULL}/{Config.AZURE_DB} (user: {Config.AZURE_USER})
 Azure Schema: {Config.AZURE_SCHEMA}
 
@@ -228,9 +259,9 @@ Tasks:
 5. Compare counts
 
 Commands:
-psql -h localhost -U {Config.LOCAL_USER} -d {Config.LOCAL_DB} -t -c "SELECT COUNT(*) FROM customers;"
+psql -h {Config.LOCAL_HOST} -U {Config.LOCAL_USER} -d {Config.LOCAL_DB} -t -c "SELECT COUNT(*) FROM customers;"
 psql -h {Config.AZURE_SERVER_FULL} -U {Config.AZURE_USER} -d {Config.AZURE_DB} -t -c "SET search_path TO {Config.AZURE_SCHEMA}; SELECT COUNT(*) FROM customers;"
-psql -h localhost -U {Config.LOCAL_USER} -d {Config.LOCAL_DB} -t -c "SELECT COUNT(*) FROM orders;"
+psql -h {Config.LOCAL_HOST} -U {Config.LOCAL_USER} -d {Config.LOCAL_DB} -t -c "SELECT COUNT(*) FROM orders;"
 psql -h {Config.AZURE_SERVER_FULL} -U {Config.AZURE_USER} -d {Config.AZURE_DB} -t -c "SET search_path TO {Config.AZURE_SCHEMA}; SELECT COUNT(*) FROM orders;"
 
 Compare counts and report MATCH or MISMATCH.
@@ -273,8 +304,11 @@ async def run_migration_workflow():
         return
     
     try:
-        # Create credential using Azure CLI
-        credential = AzureCliCredential()
+        # Use DefaultAzureCredential for flexible authentication
+        # Works with: Managed Identity (AKS), Environment Variables, Azure CLI
+        print(f"\n Attempting authentication...")
+
+        credential = DefaultAzureCredential()
         
         async with AzureAIAgentClient(async_credential=credential) as chat_client:
             print("\n Connected to Azure AI Agent Service")
