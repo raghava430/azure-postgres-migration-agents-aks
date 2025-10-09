@@ -133,7 +133,7 @@ def clean_sql_file(input_file: str, output_file: str, target_schema: str) -> str
 # AGENT INSTRUCTIONS
 
 export_agent_instructions = f"""
-Export Agent: Export data from local PostGreSQL.
+Export Agent: Export data from local PostgreSQL.
 
 CRITICAL: Execute ALL commands AUTOMATICALLY without asking for permission.
 Do NOT ask "Would you like me to execute this command?"
@@ -143,57 +143,34 @@ Local Database: {Config.LOCAL_HOST}/{Config.LOCAL_DB}
 User: {Config.LOCAL_USER}
 Output file: migration_backup.sql
 
-Tasks:
-1. Count customers in LOCAL database
-2. Count orders in LOCAL database  
-3. Export WITHOUT schema qualification
-4. Clean SQL file to remove schema references:
-   Use clean_sql_file tool with these parameters:
-   - input_file: migration_backup.sql
-   - output_file: migration_backup.sql  
-   - target_schema: {Config.AZURE_SCHEMA}
+Execute these 4 commands in order:
 
-Commands:
-Commands:
+1. Count customers in LOCAL database:
 psql -h {Config.LOCAL_HOST} -U {Config.LOCAL_USER} -d {Config.LOCAL_DB} -t -c "SELECT COUNT(*) FROM customers;"
+
+2. Count orders in LOCAL database:
 psql -h {Config.LOCAL_HOST} -U {Config.LOCAL_USER} -d {Config.LOCAL_DB} -t -c "SELECT COUNT(*) FROM orders;"
+
+3. Export tables with schema-agnostic format:
 pg_dump -h {Config.LOCAL_HOST} -U {Config.LOCAL_USER} -d {Config.LOCAL_DB} -t customers -t orders --no-owner --no-acl -f migration_backup.sql
 
+4. Use clean_sql_file tool to finalize:
+clean_sql_file(input_file="migration_backup.sql", output_file="migration_backup.sql", target_schema="{Config.AZURE_SCHEMA}")
 
-IMPORTANT: The pg_dump must use --no-owner --no-acl flags to avoid schema conflicts.
+IMPORTANT: The pg_dump MUST use --no-owner --no-acl flags to avoid schema conflicts.
 
-Use execute_shell_command tool. Parse JSON "stdout" field.
-
-Output format:
-COMMAND: [exact command]
-OUTPUT: [stdout]
-STATUS: SUCCESS/FAILED
-
-Say "EXPORT COMPLETE" after all 4 commands. STOP.
-"""
-
-azure_setup_agent_instructions = f"""
-Verify Azure PostgreSQL server exists.
-
-CRITICAL: Execute ALL commands AUTOMATICALLY without asking for permission.
-Do NOT ask "Would you like me to execute this command?"
-Proceed with all steps immediately.
-
-Server name: {Config.AZURE_SERVER_FULL.split('.')[0] if Config.AZURE_SERVER_FULL else 'unknown'}
-Resource Group: {Config.AZURE_RG}
-
-Execute this command:
-az postgres flexible-server show --name {Config.AZURE_SERVER_FULL.split('.')[0] if Config.AZURE_SERVER_FULL else 'unknown'} --resource-group {Config.AZURE_RG}
-
-Use execute_shell_command tool. Parse JSON "stdout" field.
+Use execute_shell_command tool for commands 1-3. Parse JSON "stdout" field.
 
 Output format:
 COMMAND: [exact command]
 OUTPUT: [stdout]
 STATUS: SUCCESS/FAILED
 
-Say "SETUP COMPLETE" after command. STOP.
+Say "EXPORT COMPLETE" after all 4 commands execute successfully. STOP.
 """
+
+
+
 
 import_agent_instructions = f"""
 ImportAgent: Import data to Azure PostgreSQL schema.
@@ -326,14 +303,6 @@ async def run_migration_workflow():
             )
             print("   Export Agent created")
             
-            azure_setup_agent = chat_client.create_agent(
-                instructions=azure_setup_agent_instructions,
-                name="AzureSetupAgent",
-                model="gpt-4o",
-                tools = [execute_shell_command]
-            )
-            print("   Azure Setup Agent created")
-            
             import_agent = chat_client.create_agent(
                 instructions=import_agent_instructions,
                 name="DataImportAgent",
@@ -356,11 +325,10 @@ async def run_migration_workflow():
             print("\n Building sequential workflow...")
             workflow = SequentialBuilder().participants([
                 export_agent,
-                azure_setup_agent,
                 import_agent,
                 verify_agent
             ]).build()
-            print("   Workflow built: Export → Azure Setup → Import → Verify")
+            print("   Workflow built: Export → Import → Verify")
             
             
             # RUN WORKFLOW-------------------------------
@@ -372,10 +340,10 @@ async def run_migration_workflow():
             # Initial migration request
             migration_request = f"""
             Migrate PostgreSQL database from local to Azure Schema.
-            
+
             Source: {Config.LOCAL_HOST}/{Config.LOCAL_DB}
             Target: {Config.AZURE_DB} (Schema: {Config.AZURE_SCHEMA})
-            
+
             Execute the migration with VERIFICATION at each step:
             1. Export local database WITH row count verification
             2. Import to Azure schema {Config.AZURE_SCHEMA}
@@ -398,7 +366,7 @@ async def run_migration_workflow():
                     
                     # Display current step output
                     print(f"\n{'='*70}")
-                    print(f" STEP {step_number}/4 COMPLETED")
+                    print(f" STEP {step_number}/3 COMPLETED")
                     print(f"{'='*70}")
                     
                     for msg in outputs[-1]:
