@@ -21,44 +21,9 @@ validation, and execution in distributed environments.
 
 ------------------------------------------------------------------------
 
-## Architecture
+## Architecture Diagram
 
-               ┌────────────────────────────┐
-               │      User / Pipeline       │
-               │ (Azure DevOps Trigger)     │
-               └────────────┬───────────────┘
-                            │
-                            ▼
-            ┌───────────────────────────────┐
-            │   Agent Orchestration Layer   │
-            │ (Microsoft Agent Framework)   │
-            │  - Extract Agent              │
-            │  - Load Agent                 │
-            │  - Validation Agent           │
-            └────────────┬──────────────────┘
-                         │
-                         ▼
-            ┌───────────────────────────────┐
-            │   Docker Runtime Environment  │
-            │   (Migration Execution)       │
-            └────────────┬──────────────────┘
-                         │
-                         ▼
-            ┌───────────────────────────────┐
-            │   Kubernetes (AKS Jobs)       │
-            │   Distributed Execution       │
-            └────────────┬──────────────────┘
-                         │
-                         ▼
-            ┌───────────────────────────────┐
-            │ Azure PostgreSQL (Target DB)  │
-            └────────────┬──────────────────┘
-                         │
-                         ▼
-            ┌───────────────────────────────┐
-            │ Validation Layer              │
-            │ (Row Count Comparison)        │
-            └───────────────────────────────┘
+![Architecture](docs/architecture.png)
 
 ------------------------------------------------------------------------
 
