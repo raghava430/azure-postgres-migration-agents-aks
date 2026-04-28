@@ -1,0 +1,6 @@
+.env
+venv/
+AzureCLI.msi
+*.docx
+secret.yaml
+Builddocker/
